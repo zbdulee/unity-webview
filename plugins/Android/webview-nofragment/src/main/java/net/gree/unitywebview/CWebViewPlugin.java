@@ -21,8 +21,13 @@
 
 package net.gree.unitywebview;
 
+import android.Manifest;
 import android.app.Activity;
+import android.app.Fragment;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
+import android.content.ContentValues;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 //#if UNITYWEBVIEW_DEVELOPMENT
@@ -35,7 +40,11 @@ import android.graphics.Bitmap;
 import android.graphics.Point;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.util.Base64;
+import android.util.Log;
+import android.util.Pair;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -57,12 +66,22 @@ import android.webkit.CookieManager;
 import android.webkit.CookieSyncManager;
 import android.widget.FrameLayout;
 import android.webkit.PermissionRequest;
+import android.webkit.ValueCallback;
+import androidx.core.content.FileProvider;
+// import android.support.v4.app.ActivityCompat;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Hashtable;
 import java.util.List;
@@ -100,9 +119,22 @@ class CWebViewPluginInterface {
             }
         }});
     }
+
+    @JavascriptInterface
+    public void saveDataURL(final String fileName, final String dataURL) {
+        final Activity a = UnityPlayer.currentActivity;
+        if (CWebViewPlugin.isDestroyed(a)) {
+            return;
+        }
+        a.runOnUiThread(new Runnable() {public void run() {
+            if (mPlugin.IsInitialized()) {
+                mPlugin.SaveDataURL(fileName, dataURL);
+            }
+        }});
+    }
 }
 
-public class CWebViewPlugin {
+public class CWebViewPlugin extends Fragment {
     private static boolean forceBringToFront;
     private static FrameLayout layout = null;
     private Queue<String> mMessages = new ArrayDeque<String>();
@@ -114,6 +146,8 @@ public class CWebViewPlugin {
     private boolean canGoBack;
     private boolean canGoForward;
     private boolean mInteractionEnabled = true;
+    private int[] mInteractiveRects = new int[0];
+    private boolean mTouchStartedInRect = false;
     private boolean mGoogleAppRedirectionEnabled;
     private boolean mAlertDialogEnabled;
     private boolean mAllowVideoCapture;
@@ -123,6 +157,18 @@ public class CWebViewPlugin {
     private Pattern mAllowRegex;
     private Pattern mDenyRegex;
     private Pattern mHookRegex;
+
+    private static final int INPUT_FILE_REQUEST_CODE = 1;
+    // private String mBase64Data;
+    // private static final int OUTPUT_FILE_REQUEST_CODE = 2;
+    private ValueCallback<Uri> mUploadMessage;
+    private ValueCallback<Uri[]> mFilePathCallback;
+    private Uri mCameraPhotoUri;
+
+    private static long instanceCount;
+    private long mInstanceId;
+    private boolean mPaused;
+    private List<Pair<String, CWebViewPlugin>> mTransactions;
 
     private String mBasicAuthUserName;
     private String mBasicAuthPassword;
@@ -150,6 +196,86 @@ public class CWebViewPlugin {
         intent.setSelector(null);
     }
 
+    public void SaveDataURL(final String fileName, final String dataURL) {
+        if (!dataURL.startsWith("data:")) {
+            return;
+        }
+        String tmp = dataURL.substring("data:".length());
+        int i = tmp.indexOf(";");
+        if (i < 0) {
+            return;
+        }
+        final String base64data = tmp.substring(i + 1 + "base64,".length());
+        final String type = tmp.substring(0, i);
+        final Activity a = UnityPlayer.currentActivity;
+        a.runOnUiThread(new Runnable() {public void run() {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
+                values.put(MediaStore.MediaColumns.MIME_TYPE, type);
+                values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+                values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+                ContentResolver resolver = a.getContentResolver();
+                Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                if (uri != null) {
+                    byte[] bytes = Base64.decode(base64data, Base64.DEFAULT);
+                    try (OutputStream out = resolver.openOutputStream(uri)) {
+                        if (out != null) {
+                            out.write(bytes);
+                        }
+                    } catch(Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+                values.clear();
+                values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                resolver.update(uri, values, null, null);
+            } else {
+                File file = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), fileName);
+                String parent = file.getParent();
+                String name = file.getName();
+                String ext = "";
+                int i = name.lastIndexOf(".");
+                if (i >= 0) {
+                    ext = name.substring(i);
+                    name = name.substring(0, i);
+                }
+                for (i = 1; file.exists(); i++) {
+                    file = new File(file.getParent(), name + " (" + i + ")" + ext);
+                }
+                try (FileOutputStream out = new FileOutputStream(file)) {
+                    byte[] bytes = Base64.decode(base64data, Base64.DEFAULT);
+                    if (out != null) {
+                        out.write(bytes);
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }});
+    }
+
+    // public void SaveDataURL(final String fileName, final String dataURL) {
+    //     if (mBase64Data != null) {
+    //         return;
+    //     }
+    //     if (!dataURL.startsWith("data:")) {
+    //         return;
+    //     }
+    //     String tmp = dataURL.substring("data:".length());
+    //     int i = tmp.indexOf(";");
+    //     if (i < 0) {
+    //         return;
+    //     }
+    //     mBase64Data = tmp.substring(i + 1 + "base64,".length());
+    //     final String type = tmp.substring(0, i);
+    //     Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+    //     intent.addCategory(Intent.CATEGORY_OPENABLE);
+    //     intent.setType(type);
+    //     intent.putExtra(Intent.EXTRA_TITLE, fileName);
+    //     startActivityForResult(intent, OUTPUT_FILE_REQUEST_CODE);
+    // }
+
     // cf. https://github.com/gree/unity-webview/issues/753
     // cf. https://github.com/mixpanel/mixpanel-android/issues/400
     // cf. https://github.com/mixpanel/mixpanel-android/commit/98bb530f9263f3bac0737971acc00dfef7ea4c35
@@ -164,6 +290,95 @@ public class CWebViewPlugin {
     }
 
     public CWebViewPlugin() {
+    }
+
+    public void OnRequestFileChooserPermissionsResult(final boolean granted) {
+        final Activity a = UnityPlayer.currentActivity;
+        a.runOnUiThread(new Runnable() {public void run() {
+            if (mWebView == null) {
+                return;
+            }
+            if (granted) {
+                ProcessChooser();
+            } else {
+                mFilePathCallback.onReceiveValue(null);
+                mFilePathCallback = null;
+            }
+        }});
+    }
+
+    @Override
+    public void onActivityResult(int requestCode, int resultCode, Intent data) {
+        // if (requestCode == OUTPUT_FILE_REQUEST_CODE) {
+        //     String base64data = mBase64Data;
+        //     mBase64Data = null;
+        //     // Check that the response is a good one
+        //     if (resultCode == Activity.RESULT_OK) {
+        //         final Activity a = UnityPlayer.currentActivity;
+        //         final Uri uri = data.getData();
+        //         final byte[] bytes = Base64.decode(base64data, Base64.DEFAULT);
+        //         try (OutputStream out = getActivity().getContentResolver().openOutputStream(uri)) {
+        //             if (out != null) {
+        //                 out.write(bytes);
+        //             }
+        //         } catch(Exception e) {
+        //             e.printStackTrace();
+        //         }
+        //     }
+        //     return;
+        // }
+        if (requestCode != INPUT_FILE_REQUEST_CODE) {
+            super.onActivityResult(requestCode, resultCode, data);
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            if (mFilePathCallback == null) {
+                super.onActivityResult(requestCode, resultCode, data);
+                return;
+            }
+            Uri[] results = null;
+            // Check that the response is a good one
+            if (resultCode == Activity.RESULT_OK) {
+                if (data == null) {
+                    if (mCameraPhotoUri != null) {
+                        results = new Uri[] { mCameraPhotoUri };
+                    }
+                } else {
+                    ClipData clipData = data.getClipData();
+                    if (clipData != null) {
+                        results = new Uri[clipData.getItemCount()];
+                        for (int i = 0; i < clipData.getItemCount(); i++) {
+                            results[i] = clipData.getItemAt(i).getUri();
+                        }
+                    } else {
+                        String dataString = data.getDataString();
+                        // cf. https://www.petitmonte.com/java/android_webview_camera.html
+                        if (dataString == null) {
+                            if (mCameraPhotoUri != null) {
+                                results = new Uri[] { mCameraPhotoUri };
+                            }
+                        } else {
+                            results = new Uri[] { Uri.parse(dataString) };
+                        }
+                    }
+                }
+            }
+            mFilePathCallback.onReceiveValue(results);
+            mFilePathCallback = null;
+        } else {
+            if (mUploadMessage == null) {
+                super.onActivityResult(requestCode, resultCode, data);
+                return;
+            }
+            Uri result = null;
+            if (resultCode == Activity.RESULT_OK) {
+                if (data != null) {
+                    result = data.getData();
+                }
+            }
+            mUploadMessage.onReceiveValue(result);
+            mUploadMessage = null;
+        }
     }
 
     public static boolean IsWebViewAvailable() {
@@ -212,6 +427,8 @@ public class CWebViewPlugin {
     public void Init(final String gameObject, final boolean transparent, final boolean zoom, final int androidForceDarkMode, final String ua, final int radius) {
         final CWebViewPlugin self = this;
         final Activity a = UnityPlayer.currentActivity;
+        instanceCount++;
+        mInstanceId = instanceCount;
         if (CWebViewPlugin.isDestroyed(a)) {
             return;
         }
@@ -219,6 +436,21 @@ public class CWebViewPlugin {
             if (mWebView != null) {
                 return;
             }
+
+            setRetainInstance(true);
+            if (mPaused) {
+                if (mTransactions == null) {
+                    mTransactions = new ArrayList<Pair<String, CWebViewPlugin>>();
+                }
+                mTransactions.add(Pair.create("add", self));
+            } else {
+                a
+                    .getFragmentManager()
+                    .beginTransaction()
+                    .add(0, self, "CWebViewPlugin" + mInstanceId)
+                    .commitAllowingStateLoss();
+            }
+
             mAlertDialogEnabled = true;
             mAllowVideoCapture = false;
             mAllowAudioCapture = false;
@@ -327,6 +559,39 @@ public class CWebViewPlugin {
                 public void onGeolocationPermissionsShowPrompt(String origin, Callback callback) {
                     callback.invoke(origin, true, false);
                 }
+
+                // For Android < 3.0 (won't work because we cannot utilize FragmentActivity)
+                // public void openFileChooser(ValueCallback<Uri> uploadFile) {
+                //     openFileChooser(uploadFile, "");
+                // }
+
+                // For 3.0 <= Android < 4.1
+                public void openFileChooser(ValueCallback<Uri> uploadFile, String acceptType) {
+                    openFileChooser(uploadFile, acceptType, "");
+                }
+
+                // For 4.1 <= Android < 5.0
+                public void openFileChooser(ValueCallback<Uri> uploadFile, String acceptType, String capture) {
+                    if (mUploadMessage != null) {
+                        mUploadMessage.onReceiveValue(null);
+                    }
+                    mUploadMessage = uploadFile;
+                    Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    intent.setType("*/*");
+                    startActivityForResult(intent, INPUT_FILE_REQUEST_CODE);
+                }
+
+                // For Android 5.0+
+                @Override
+                public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
+                    // cf. https://github.com/googlearchive/chromium-webview-samples/blob/master/input-file-example/app/src/main/java/inputfilesample/android/chrome/google/com/inputfilesample/MainFragment.java
+
+                    mFilePathCallback = filePathCallback;
+                    MyUnitySendMessage(gameObject, "RequestFileChooserPermissions", "");
+                    return true;
+                }
+
             });
 
             mWebViewPlugin = new CWebViewPluginInterface(self, gameObject);
@@ -606,7 +871,22 @@ public class CWebViewPlugin {
                 new View.OnTouchListener() {
                     @Override
                     public boolean onTouch(View view, MotionEvent event) {
-                        return !mInteractionEnabled;
+                        if (!mInteractionEnabled) return false;
+                        int action = event.getActionMasked();
+                        if (action == MotionEvent.ACTION_DOWN) {
+                            int x = (int) event.getX();
+                            int y = (int) event.getY();
+                            mTouchStartedInRect = false;
+                            int[] rects = mInteractiveRects;
+                            for (int i = 0; i + 3 < rects.length; i += 4) {
+                                if (x >= rects[i] && x <= rects[i] + rects[i + 2]
+                                        && y >= rects[i + 1] && y <= rects[i + 1] + rects[i + 3]) {
+                                    mTouchStartedInRect = true;
+                                    break;
+                                }
+                            }
+                        }
+                        return !mTouchStartedInRect;
                     }
                 });
 
@@ -659,7 +939,7 @@ public class CWebViewPlugin {
                 // int heightDiff = rootView.getHeight() - (r.bottom - r.top);
                 // String param = "" ;
                 // if (heightDiff > 0 && (heightDiff + bottomPadding) > (h + bottomPadding) / 3) { // assume that this means that the keyboard is on
-                //     param = "true";
+                //     param = "" + heightDiff;
                 // } else {
                 //     param = "false";
                 // }
@@ -673,8 +953,72 @@ public class CWebViewPlugin {
         activityRootView.getViewTreeObserver().addOnGlobalLayoutListener(mGlobalLayoutListener);
     }
 
+    private void ProcessChooser() {
+        mCameraPhotoUri = null;
+        Intent takePictureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+        if (takePictureIntent.resolveActivity(getActivity().getPackageManager()) != null) {
+            // Create the File where the photo should go
+            File photoFile = null;
+            try {
+                photoFile = createImageFile();
+            } catch (IOException ex) {
+                // Error occurred while creating the File
+                //Log.e("CWebViewPlugin", "Unable to create Image File", ex);
+            }
+            // Continue only if the File was successfully created
+            if (photoFile != null) {
+                takePictureIntent.putExtra("PhotoPath", photoFile);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    mCameraPhotoUri = FileProvider.getUriForFile(getActivity(), getActivity().getPackageName() + ".unitywebview.fileprovider", photoFile);
+                } else {
+                    mCameraPhotoUri = Uri.parse("file:" + photoFile.getAbsolutePath());
+                }
+                takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, mCameraPhotoUri);
+                //takePictureIntent.putExtra(MediaStore.EXTRA_SIZE_LIMIT, "720000");
+            } else {
+                takePictureIntent = null;
+            }
+        }
+
+        Intent contentSelectionIntent = new Intent(Intent.ACTION_GET_CONTENT);
+        contentSelectionIntent.addCategory(Intent.CATEGORY_OPENABLE);
+        contentSelectionIntent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        contentSelectionIntent.setType("*/*");
+
+        Intent[] intentArray;
+        if(takePictureIntent != null) {
+            intentArray = new Intent[]{takePictureIntent};
+        } else {
+            intentArray = new Intent[0];
+        }
+
+        Intent chooserIntent = new Intent(Intent.ACTION_CHOOSER);
+        chooserIntent.putExtra(Intent.EXTRA_INTENT, contentSelectionIntent);
+        // chooserIntent.putExtra(Intent.EXTRA_TITLE, "Image Chooser");
+        chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, intentArray);
+
+        startActivityForResult(Intent.createChooser(chooserIntent, "Select images"), INPUT_FILE_REQUEST_CODE);
+    }
+
+    private File createImageFile() throws IOException {
+        // Create an image file name
+        String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+        String imageFileName = "JPEG_" + timeStamp + "_";
+        File storageDir = getActivity().getExternalFilesDir(Environment.DIRECTORY_DCIM);
+        if (!storageDir.exists()) {
+            storageDir.mkdirs();
+        }
+        File imageFile = File.createTempFile(imageFileName,  /* prefix */
+                                             ".jpg",         /* suffix */
+                                             storageDir      /* directory */
+                                             );
+        return imageFile;
+    }
+
     public void Destroy() {
         final Activity a = UnityPlayer.currentActivity;
+        final CWebViewPlugin self = this;
+        mMessages.clear();
         if (CWebViewPlugin.isDestroyed(a)) {
             return;
         }
@@ -697,6 +1041,20 @@ public class CWebViewPlugin {
             }
             layout.removeView(webView);
             webView.destroy();
+
+            if (mPaused) {
+                if (mTransactions == null) {
+                    mTransactions = new ArrayList<Pair<String, CWebViewPlugin>>();
+                }
+                mTransactions.add(Pair.create("remove", self));
+            } else {
+                a
+                    .getFragmentManager()
+                    .beginTransaction()
+                    .remove(self)
+                    .commitAllowingStateLoss();
+            }
+
         }});
     }
 
@@ -862,6 +1220,10 @@ public class CWebViewPlugin {
         }});
     }
 
+    public void SetInteractiveRects(final int[] flatRects) {
+        mInteractiveRects = (flatRects != null) ? flatRects : new int[0];
+    }
+
     public void SetGoogleAppRedirectionEnabled(final boolean enabled) {
         final Activity a = UnityPlayer.currentActivity;
         if (CWebViewPlugin.isDestroyed(a)) {
@@ -960,16 +1322,41 @@ public class CWebViewPlugin {
     }
 
     // cf. https://stackoverflow.com/questions/31788748/webview-youtube-videos-playing-in-background-on-rotation-and-minimise/31789193#31789193
-    public void OnApplicationPause(final boolean paused) {
+    public void OnApplicationPause(boolean paused) {
+        mPaused = paused;
         final Activity a = UnityPlayer.currentActivity;
         if (CWebViewPlugin.isDestroyed(a)) {
             return;
         }
         a.runOnUiThread(new Runnable() {public void run() {
+            if (!mPaused) {
+                if (mTransactions != null) {
+                    for (Pair<String, CWebViewPlugin> pair : mTransactions) {
+                        CWebViewPlugin self = pair.second;
+                        switch (pair.first) {
+                        case "add":
+                            a
+                                .getFragmentManager()
+                                .beginTransaction()
+                                .add(0, self, "CWebViewPlugin" + mInstanceId)
+                                .commitAllowingStateLoss();
+                            break;
+                        case "remove":
+                            a
+                                .getFragmentManager()
+                                .beginTransaction()
+                                .remove(self)
+                                .commitAllowingStateLoss();
+                            break;
+                        }
+                    }
+                    mTransactions.clear();
+                }
+            }
             if (mWebView == null) {
                 return;
             }
-            if (paused) {
+            if (mPaused) {
                 mWebView.onPause();
                 if (mWebView.getVisibility() == View.VISIBLE) {
                     // cf. https://qiita.com/nbhd/items/d31711faa8852143f3a4
@@ -1072,6 +1459,9 @@ public class CWebViewPlugin {
            CookieManager.getInstance().flush();
         } else {
            final Activity a = UnityPlayer.currentActivity;
+           if (CWebViewPlugin.isDestroyed(a)) {
+               return;
+           }
            CookieSyncManager cookieSyncManager = CookieSyncManager.createInstance(a);
            cookieSyncManager.startSync();
            CookieManager cookieManager = CookieManager.getInstance();

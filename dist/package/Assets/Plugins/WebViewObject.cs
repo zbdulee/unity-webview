@@ -1158,6 +1158,17 @@ public class WebViewObject : MonoBehaviour
 #endif
     }
 
+    public void SetInteractiveRects(int[] flatRects)
+    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+        if (webView == null)
+            return;
+        webView.Call("SetInteractiveRects", flatRects ?? new int[0]);
+#elif UNITY_IPHONE && !UNITY_EDITOR
+        // TODO: iOS implementation via _CWebViewPlugin_SetInteractiveRects
+#endif
+    }
+
     public void SetGoogleAppRedirectionEnabled(bool enabled)
     {
 #if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX

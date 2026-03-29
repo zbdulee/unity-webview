@@ -146,6 +146,8 @@ public class CWebViewPlugin extends Fragment {
     private boolean canGoBack;
     private boolean canGoForward;
     private boolean mInteractionEnabled = true;
+    private int[] mInteractiveRects = new int[0];
+    private boolean mTouchStartedInRect = false;
     private boolean mGoogleAppRedirectionEnabled;
     private boolean mAlertDialogEnabled;
     private boolean mAllowVideoCapture;
@@ -869,7 +871,22 @@ public class CWebViewPlugin extends Fragment {
                 new View.OnTouchListener() {
                     @Override
                     public boolean onTouch(View view, MotionEvent event) {
-                        return !mInteractionEnabled;
+                        if (!mInteractionEnabled) return false;
+                        int action = event.getActionMasked();
+                        if (action == MotionEvent.ACTION_DOWN) {
+                            int x = (int) event.getX();
+                            int y = (int) event.getY();
+                            mTouchStartedInRect = false;
+                            int[] rects = mInteractiveRects;
+                            for (int i = 0; i + 3 < rects.length; i += 4) {
+                                if (x >= rects[i] && x <= rects[i] + rects[i + 2]
+                                        && y >= rects[i + 1] && y <= rects[i + 1] + rects[i + 3]) {
+                                    mTouchStartedInRect = true;
+                                    break;
+                                }
+                            }
+                        }
+                        return !mTouchStartedInRect;
                     }
                 });
 
@@ -1201,6 +1218,10 @@ public class CWebViewPlugin extends Fragment {
         a.runOnUiThread(new Runnable() {public void run() {
             mInteractionEnabled = enabled;
         }});
+    }
+
+    public void SetInteractiveRects(final int[] flatRects) {
+        mInteractiveRects = (flatRects != null) ? flatRects : new int[0];
     }
 
     public void SetGoogleAppRedirectionEnabled(final boolean enabled) {
